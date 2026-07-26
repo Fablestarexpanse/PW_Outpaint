@@ -164,6 +164,40 @@ def _compose(src_np, pads, fill_mode, fill_rgb):
     return canvas, mask
 
 
+def _diff_mask(pads, src_w, src_h, expand, feather):
+    """Gradient mask for DifferentialDiffusion: 1.0 over new padding, a smooth
+    ramp across the repaint ring, exactly 0.0 over the untouched interior.
+
+    The ramp uses smoothstep rather than linear so there is no derivative
+    discontinuity at either end of the ring. When mask_expand is 0 we still
+    ramp over max(mask_feather, 8) px - a hard binary edge would make
+    DifferentialDiffusion a no-op.
+    """
+    out_h = src_h + pads["t"] + pads["b"]
+    out_w = src_w + pads["l"] + pads["r"]
+    ring = expand if expand > 0 else max(feather, 8)
+
+    # distance (in px) of each source pixel from the nearest padded edge
+    xs = np.arange(src_w, dtype=np.float32)
+    ys = np.arange(src_h, dtype=np.float32)
+    dist = np.full((src_h, src_w), np.inf, dtype=np.float32)
+    if pads["l"] > 0:
+        dist = np.minimum(dist, xs[None, :])
+    if pads["r"] > 0:
+        dist = np.minimum(dist, (src_w - 1 - xs)[None, :])
+    if pads["t"] > 0:
+        dist = np.minimum(dist, ys[:, None] + np.zeros((1, src_w), dtype=np.float32))
+    if pads["b"] > 0:
+        dist = np.minimum(dist, (src_h - 1 - ys)[:, None] + np.zeros((1, src_w), dtype=np.float32))
+
+    t = np.clip(1.0 - dist / float(ring), 0.0, 1.0)
+    ramp = t * t * (3.0 - 2.0 * t)  # smoothstep
+
+    mask = np.ones((out_h, out_w), dtype=np.float32)
+    mask[pads["t"]:pads["t"] + src_h, pads["l"]:pads["l"] + src_w] = ramp
+    return mask
+
+
 def _refine_mask(hard_mask, expand, feather):
     """Optionally dilate the mask into the image, then soften the seam."""
     mask = hard_mask
@@ -228,8 +262,8 @@ class PWOutpaint:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "PW_FRAME")
-    RETURN_NAMES = ("control_image", "control_mask", "mask_image", "width", "height", "frame")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "PW_FRAME", "MASK")
+    RETURN_NAMES = ("control_image", "control_mask", "mask_image", "width", "height", "frame", "diff_mask")
     FUNCTION = "outpaint"
     OUTPUT_NODE = True
     CATEGORY = "Promptwaffle"
@@ -291,8 +325,11 @@ class PWOutpaint:
         colorized = mask[..., None] * mask_rgb + (1.0 - mask[..., None]) * bg_rgb
         mask_image = torch.from_numpy(colorized.clip(0.0, 1.0)).unsqueeze(0).repeat(batch, 1, 1, 1)
 
+        diff = _diff_mask(pads, src_w, src_h, int(mask_expand), int(mask_feather))
+        diff_mask = torch.from_numpy(diff).unsqueeze(0).repeat(batch, 1, 1)
+
         frame_info = {"pads": dict(pads), "src_w": src_w, "src_h": src_h}
-        return (control_image, control_mask, mask_image, out_w, out_h, frame_info)
+        return (control_image, control_mask, mask_image, out_w, out_h, frame_info, diff_mask)
 
     def _await_editor(self, frame, node_id):
         """Publish the frame to the editor and wait for its verdict.
