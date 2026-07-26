@@ -1,0 +1,14 @@
+[project]
+name = "pw_outpaint"
+description = "PW Outpaint - interactive outpaint framing node for ComfyUI. Pause the run, drag the new canvas onto your image, and get a control image + mask sized for Flux.2 Klein, Qwen Image Edit, and other inpaint/outpaint pipelines."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Fablestarexpanse/PW_Outpaint"
+
+[tool.comfy]
+PublisherId = "fablestarexpanse"
+DisplayName = "PW Outpaint"
+Icon = ""
