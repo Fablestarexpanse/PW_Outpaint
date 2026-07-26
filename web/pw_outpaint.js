@@ -323,7 +323,7 @@ function draw(st, canvas) {
     if (st.pads.l > 0) miniPill(ctx, (r.x0 + ix0) / 2, cy, `+${st.pads.l}`);
     if (st.pads.r > 0) miniPill(ctx, (ix0 + iw + r.x1) / 2, cy, `+${st.pads.r}`);
 
-    pill(ctx, cx, r.y1 - 16, `${outW(st)} × ${outH(st)}`);
+    pill(ctx, cx, r.y1 - 16, `${outW(st)} x ${outH(st)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ function buildEditor(node) {
     canvas.tabIndex = 0;
     const zoomPill = el("button",
         `position:absolute;bottom:6px;left:7px;padding:2px 9px;font-size:10px;font-family:monospace;background:rgba(0,0,0,0.55);color:${T.textDim};border:1px solid rgba(255,255,255,0.12);border-radius:999px;cursor:pointer;`,
-        { type: "button", textContent: "100%", title: "Zoom — click to refit (scroll = zoom, drag outside the frame = pan, double-click = refit)" });
+        { type: "button", textContent: "100%", title: "Zoom - click to refit (scroll = zoom, drag outside the frame = pan, double-click = refit)" });
     stage.append(canvas, zoomPill);
 
     // status row
@@ -427,12 +427,12 @@ function buildEditor(node) {
     });
     for (const [value, label] of ASPECTS) aspectSel.append(el("option", "", { value, textContent: label }));
     const scaleBtns = SCALES.map((k) => {
-        const b = softBtn(`×${k}`, { title: `Extend the canvas to ${k}× the source size` });
+        const b = softBtn(`x${k}`, { title: `Extend the canvas to ${k}x the source size` });
         b.style.padding = "3px 7px";
         b.style.fontFamily = "monospace";
         return b;
     });
-    outRow.append(wField, el("span", `font-size:10px;color:${T.textDim};`, { textContent: "×" }), hField, aspectSel, ...scaleBtns);
+    outRow.append(wField, el("span", `font-size:10px;color:${T.textDim};`, { textContent: "x" }), hField, aspectSel, ...scaleBtns);
 
     // anchor grid + colors
     const midRow = el("div", "display:flex;align-items:center;gap:16px;");
@@ -540,8 +540,8 @@ function refreshControls(ui) {
         ui.zoomPill.textContent = pct + "%";
     }
     ui.statusText.textContent = st.waiting
-        ? "Paused — frame the outpaint, then press Accept"
-        : (st.armed ? "Batch armed — queued runs reuse this frame" : (st.srcW ? `${st.srcW} × ${st.srcH} source` : "Idle"));
+        ? "Paused - frame the outpaint, then press Accept"
+        : (st.armed ? "Batch armed - queued runs reuse this frame" : (st.srcW ? `${st.srcW} x ${st.srcH} source` : "Idle"));
     ui.statusText.style.color = st.waiting ? "rgba(255,255,255,0.85)" : T.textDim;
 }
 
@@ -790,7 +790,7 @@ function wirePresets(ui) {
                 span.onmouseenter = () => span.style.background = T.btnHover;
                 span.onmouseleave = () => span.style.background = "transparent";
                 span.onclick = () => applyPreset(name);
-                const del = el("span", `cursor:pointer;margin-left:8px;font-size:12px;opacity:0.6;color:${T.dangerText};`, { textContent: "✕", title: "Delete preset" });
+                const del = el("span", `cursor:pointer;margin-left:8px;font-size:12px;opacity:0.6;color:${T.dangerText};`, { textContent: "x", title: "Delete preset" });
                 del.onmouseenter = () => del.style.opacity = "1";
                 del.onmouseleave = () => del.style.opacity = "0.6";
                 del.onclick = async (e) => {
@@ -828,7 +828,7 @@ function wireSession(ui, ensureNodeFits) {
         setActionsVisible(ui, false);
         ensureNodeFits(true);
         repaint(ui);
-        ui.statusText.textContent = "Session expired — run again";
+        ui.statusText.textContent = "Session expired - run again";
     };
     const beat = async () => {
         try {

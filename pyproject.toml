@@ -1,7 +1,7 @@
 [project]
 name = "pw_outpaint"
-description = "PW Outpaint - interactive outpaint framing node for ComfyUI. Pause the run, drag the new canvas onto your image, and get a control image + mask sized for Flux.2 Klein, Qwen Image Edit, and other inpaint/outpaint pipelines."
-version = "1.0.0"
+description = "PW Outpaint - a four-node outpainting toolkit for ComfyUI: interactive outpaint framing (pause, drag the new canvas, accept), pixel-perfect stitch-back, band QC metering, and frame-aware banded color matching. Built for Flux.2 Klein, Qwen Image Edit, and other inpaint/outpaint pipelines."
+version = "1.1.0"
 license = { file = "LICENSE" }
 dependencies = []
 
@@ -12,3 +12,7 @@ Repository = "https://github.com/Fablestarexpanse/PW_Outpaint"
 PublisherId = "fablestarexpanse"
 DisplayName = "PW Outpaint"
 Icon = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
