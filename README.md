@@ -39,7 +39,58 @@ You'll find the node under **Add Node → Promptwaffle → PW Outpaint** (or dou
 3. Drag the frame edges outward (or use the aspect menu, scale buttons, anchor grid, or type paddings/output size directly). The tinted strips are the areas that will be generated.
 4. Press **Accept**. The workflow continues.
 
-> No browser open? After ~10 seconds the run continues using the paddings stored on the node — so the node is safe to use in API/headless pipelines too.
+> No browser open? After a short grace period the run continues using the paddings stored on the node — so the node is safe to use in API/headless pipelines too.
+
+## Wiring it into a workflow
+
+PW Outpaint doesn't generate anything itself — it prepares the three things every outpaint pipeline needs: the enlarged canvas (`control_image`), the mask saying where to generate (`control_mask`), and the output dimensions (`width`/`height`). Here's how to connect them.
+
+### The general pattern (any inpaint-capable model)
+
+```
+LoadImage ──→ PW Outpaint ─┬─ control_image ─→ InpaintModelConditioning (pixels)
+                           ├─ control_mask ──→ InpaintModelConditioning (mask)
+                           │                        │ (+ positive, negative, VAE)
+                           │                        ▼
+                           │                    KSampler ─→ VAEDecode ─┐
+                           ├─ frame ───────────────────────────────────┤
+LoadImage (same image) ────┼───────────────────────────────────────────┤
+                           │                                           ▼
+                           │                                  PW Outpaint Stitch ─→ SaveImage
+```
+
+1. `control_image` → **InpaintModelConditioning** `pixels` (it VAE-encodes internally).
+2. `control_mask` → **InpaintModelConditioning** `mask`.
+3. Sample with your model, decode, done. Add **PW Outpaint Stitch** at the end (see below) to keep the original pixels untouched.
+
+### Flux.2 Klein (what the example workflow does)
+
+Klein is an edit model, so the canvas also goes in as a reference:
+
+```
+PW Outpaint ─┬─ control_image ─→ VAEEncode ─→ ReferenceLatent ─→ (conditioning chain)
+             ├─ control_image ─→ InpaintModelConditioning (pixels)
+             ├─ control_mask ──→ InpaintModelConditioning (mask)
+             ├─ width ─────────→ EmptyFlux2LatentImage (width)
+             └─ height ────────→ EmptyFlux2LatentImage (height)
+
+ReferenceLatent + InpaintModelConditioning ─→ KSampler (latent from EmptyFlux2LatentImage)
+                                              └─→ VAEDecode ─→ PW Outpaint Stitch ─→ SaveImage
+```
+
+Prompt tip for edit models: set `fill_mode` to `solid_color` with a bold color (e.g. red) and prompt something like *"Remove the red areas and extend the scene naturally."* — the model sees exactly where to work. `mask_image` is a ready-made visualization of that colored target if your workflow wants it as a separate reference.
+
+### Stitching (recommended finish for every outpaint)
+
+```
+VAEDecode ────────────────→ images ┐
+LoadImage (the original) ─→ source ├─ PW Outpaint Stitch ─→ SaveImage
+PW Outpaint `frame` ──────→ frame  ┘
+```
+
+Connect `source` to the **same image you fed into PW Outpaint**, and `frame` to PW Outpaint's `frame` output — the stitch then knows exactly where the original sits inside the generated canvas and pastes it back pixel-perfect with a feathered seam.
+
+Drag [`examples/pw_outpaint_klein9b.json`](examples/pw_outpaint_klein9b.json) into ComfyUI to see all of this pre-wired.
 
 ### Outputs
 
@@ -63,17 +114,9 @@ You'll find the node under **Add Node → Promptwaffle → PW Outpaint** (or dou
 
 ## PW Outpaint Stitch — keep the original pixel-perfect
 
-Sampling an outpaint pushes the *whole* canvas through the VAE, which subtly shifts every pixel — even the ones that were never masked. **PW Outpaint Stitch** fixes that: after generation, it pastes your untouched original image back into its exact spot, with a feathered seam so the transition into the generated area stays invisible.
+Sampling an outpaint pushes the *whole* canvas through the VAE, which subtly shifts every pixel — even the ones that were never masked. **PW Outpaint Stitch** fixes that: after generation, it pastes your untouched original image back into its exact spot, with a feathered seam so the transition into the generated area stays invisible. See [Wiring it into a workflow](#wiring-it-into-a-workflow) for the hookup.
 
-Wire it after your VAE Decode:
-
-```
-VAEDecode ──────────────→ images ┐
-LoadImage (the original) → source ├ PW Outpaint Stitch → final image
-PW Outpaint frame output → frame  ┘
-```
-
-`seam_feather` (default 24) controls how many pixels of the source edge blend into the generated area. It also auto-corrects small size drift if your sampler returned a slightly different resolution. The included example workflow already has it wired up.
+`seam_feather` (default 24) controls how many pixels of the source edge blend into the generated area. It also auto-corrects small size drift if your sampler returned a slightly different resolution.
 
 ### Batch mode
 
@@ -85,15 +128,7 @@ Toggle **Batch on** before Accept and your framing is remembered. Every followin
 
 ## Flux.2 Klein example
 
-An example workflow is included in [`examples/pw_outpaint_klein9b.json`](examples/pw_outpaint_klein9b.json) — drag it into ComfyUI. The wiring is:
-
-```
-LoadImage → PW Outpaint ─ control_image → VAEEncode → ReferenceLatent ┐
-                        ├ control_mask ──────────→ InpaintModelConditioning → KSampler → VAEDecode → SaveImage
-                        └ width/height ──→ EmptyFlux2LatentImage ┘
-```
-
-You'll need to point the loader nodes at your own Klein 9B checkpoint, Flux.2 VAE, and text encoder — the filenames in the example are placeholders.
+An example workflow is included in [`examples/pw_outpaint_klein9b.json`](examples/pw_outpaint_klein9b.json) — drag it into ComfyUI. It follows the [Klein wiring](#flux2-klein-what-the-example-workflow-does) above, with PW Outpaint Stitch already on the end. You'll need to point the loader nodes at your own Klein 9B checkpoint, Flux.2 VAE, and text encoder — the filenames in the example are placeholders.
 
 ## License
 
