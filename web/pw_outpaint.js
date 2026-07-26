@@ -170,6 +170,7 @@ function fitView(st, cw, ch) {
     st.view.scale = Math.min((cw - VIEW_MARGIN * 2) / fw, (ch - VIEW_MARGIN * 2) / fh);
     st.view.ox = (cw - fw * st.view.scale) / 2;
     st.view.oy = (ch - fh * st.view.scale) / 2;
+    st.view.fitScale = st.view.scale;
     st.view.fittedFor = cw + "x" + ch;
 }
 
@@ -246,6 +247,19 @@ function pill(ctx, x, y, text) {
     ctx.fillText(text, x, y + 0.5);
 }
 
+function miniPill(ctx, x, y, text) {
+    ctx.font = "10px monospace";
+    const w = ctx.measureText(text).width + 10;
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.beginPath();
+    ctx.roundRect(x - w / 2, y - 7.5, w, 15, 7.5);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, x, y + 0.5);
+}
+
 function draw(st, canvas) {
     const ctx = canvas.getContext("2d");
     const dpr = window.devicePixelRatio || 1;
@@ -302,18 +316,12 @@ function draw(st, canvas) {
         ctx.stroke();
     }
 
-    // pad readouts on each extended side
-    ctx.font = "10px monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = st.colors.mask;
-    ctx.shadowColor = "rgba(0,0,0,0.8)";
-    ctx.shadowBlur = 3;
-    if (st.pads.t > 0) ctx.fillText(`+${st.pads.t}`, cx, (r.y0 + iy0) / 2);
-    if (st.pads.b > 0) ctx.fillText(`+${st.pads.b}`, cx, (iy0 + ih + r.y1) / 2);
-    if (st.pads.l > 0) ctx.fillText(`+${st.pads.l}`, (r.x0 + ix0) / 2, cy);
-    if (st.pads.r > 0) ctx.fillText(`+${st.pads.r}`, (ix0 + iw + r.x1) / 2, cy);
-    ctx.shadowBlur = 0;
+    // pad readouts on each extended side (neutral pills - the strips behind
+    // them are tinted with the mask color, so colored text would vanish)
+    if (st.pads.t > 0) miniPill(ctx, cx, (r.y0 + iy0) / 2, `+${st.pads.t}`);
+    if (st.pads.b > 0) miniPill(ctx, cx, (iy0 + ih + r.y1) / 2, `+${st.pads.b}`);
+    if (st.pads.l > 0) miniPill(ctx, (r.x0 + ix0) / 2, cy, `+${st.pads.l}`);
+    if (st.pads.r > 0) miniPill(ctx, (ix0 + iw + r.x1) / 2, cy, `+${st.pads.r}`);
 
     pill(ctx, cx, r.y1 - 16, `${outW(st)} × ${outH(st)}`);
 }
@@ -379,19 +387,26 @@ function buildEditor(node) {
     const st = freshState();
     const root = el("div", `width:100%;box-sizing:border-box;padding:6px;font-family:system-ui,sans-serif;font-size:12px;color:${T.text};position:relative;`);
 
+    const stage = el("div", "position:relative;");
     const canvas = el("canvas", `display:block;width:100%;height:${EDITOR_H}px;background:${T.surface};border:${T.surfaceBorder};border-radius:8px;touch-action:none;`);
     canvas.tabIndex = 0;
+    const zoomPill = el("button",
+        `position:absolute;bottom:6px;left:7px;padding:2px 9px;font-size:10px;font-family:monospace;background:rgba(0,0,0,0.55);color:${T.textDim};border:1px solid rgba(255,255,255,0.12);border-radius:999px;cursor:pointer;`,
+        { type: "button", textContent: "100%", title: "Zoom — click to refit (scroll = zoom, drag outside the frame = pan, double-click = refit)" });
+    stage.append(canvas, zoomPill);
 
     // status row
-    const statusRow = el("div", "display:flex;align-items:center;justify-content:space-between;margin-top:5px;gap:8px;");
+    const statusRow = el("div", "display:flex;align-items:center;gap:8px;");
     const statusText = el("div", `font-size:11px;color:${T.textDim};flex:1;`, { textContent: "Idle" });
-    const fitBtn = softBtn("Fit view", { title: "Refit the frame in the editor (or double-click the canvas)" });
-    statusRow.append(statusText, fitBtn);
+    statusRow.append(statusText);
+
+    // fixed-width leading labels keep the control rows column-aligned
+    const rowLabel = (text) => el("span", `font-size:10px;color:${T.textDim};flex:0 0 38px;text-align:right;`, { textContent: text });
 
     // paddings row
-    const padsRow = el("div", "display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:4px;");
+    const padsRow = el("div", "display:flex;align-items:center;gap:5px;flex-wrap:wrap;");
     const padInputs = {};
-    padsRow.append(el("span", `font-size:10px;color:${T.textDim};`, { textContent: "Pad" }));
+    padsRow.append(rowLabel("Pad"));
     for (const [key, tag] of [["l", "L"], ["t", "T"], ["r", "R"], ["b", "B"]]) {
         padsRow.append(el("span", `font-size:10px;color:${T.textDim};`, { textContent: tag }));
         const f = numField("52px");
@@ -400,8 +415,8 @@ function buildEditor(node) {
     }
 
     // output row: W/H, aspect menu, scale shortcuts
-    const outRow = el("div", "display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:2px;");
-    outRow.append(el("span", `font-size:10px;color:${T.textDim};`, { textContent: "Out" }));
+    const outRow = el("div", "display:flex;align-items:center;gap:5px;flex-wrap:wrap;");
+    outRow.append(rowLabel("Out"));
     const wField = numField("58px");
     const hField = numField("58px");
     const aspectSel = el("select", "");
@@ -420,16 +435,18 @@ function buildEditor(node) {
     outRow.append(wField, el("span", `font-size:10px;color:${T.textDim};`, { textContent: "×" }), hField, aspectSel, ...scaleBtns);
 
     // anchor grid + colors
-    const midRow = el("div", "display:flex;align-items:flex-start;gap:14px;margin-top:4px;");
-    const anchorWrap = el("div", "display:flex;align-items:center;gap:6px;");
-    anchorWrap.append(el("span", `font-size:10px;color:${T.textDim};`, { textContent: "Anchor" }));
-    const anchorGrid = el("div", "display:grid;grid-template-columns:repeat(3,16px);grid-auto-rows:16px;gap:2px;");
+    const midRow = el("div", "display:flex;align-items:center;gap:16px;");
+    const anchorWrap = el("div", "display:flex;align-items:center;gap:5px;");
+    anchorWrap.append(rowLabel("Anchor"));
+    const anchorGrid = el("div", "display:grid;grid-template-columns:repeat(3,19px);grid-auto-rows:19px;gap:3px;");
     const anchorBtns = [];
     for (const fy of [0, 0.5, 1]) {
         for (const fx of [0, 0.5, 1]) {
             const b = el("button", `border:1px solid ${T.border};background:${T.btn};border-radius:3px;cursor:pointer;padding:0;`, { type: "button", title: "Where the source sits inside the output" });
             b.dataset.fx = fx;
             b.dataset.fy = fy;
+            b.onmouseenter = () => { if (!b._on) b.style.background = T.btnHover; };
+            b.onmouseleave = () => { b.style.background = b._on ? "rgba(255,255,255,0.75)" : T.btn; };
             anchorBtns.push(b);
             anchorGrid.appendChild(b);
         }
@@ -443,7 +460,7 @@ function buildEditor(node) {
     midRow.append(anchorWrap, colorCol);
 
     // presets
-    const presetRow = el("div", "display:flex;align-items:center;gap:6px;margin-top:4px;");
+    const presetRow = el("div", "display:flex;align-items:center;gap:6px;");
     const saveBtn = softBtn("Save preset", { flex: "1" });
     const loadBtn = softBtn("Load preset", { flex: "1" });
     presetRow.append(saveBtn, loadBtn);
@@ -460,7 +477,7 @@ function buildEditor(node) {
 
     // action buttons
     const action = (label, tone) => {
-        const b = el("button", "padding:6px 12px;font-size:11px;font-weight:600;border-radius:4px;cursor:pointer;width:100%;text-align:center;display:none;letter-spacing:0.3px;margin-top:3px;", { textContent: label, type: "button" });
+        const b = el("button", "padding:6px 12px;font-size:11px;font-weight:600;border-radius:4px;cursor:pointer;width:100%;text-align:center;display:none;letter-spacing:0.3px;", { textContent: label, type: "button" });
         const [bg, border, color] = tone === "ok" ? [T.okBg, T.okBorder, T.okText]
             : tone === "danger" ? [T.dangerBg, T.dangerBorder, T.dangerText]
                 : [T.btn, T.border, T.text];
@@ -472,16 +489,19 @@ function buildEditor(node) {
     const acceptBtn = action("Accept", "ok");
     const cancelBtn = action("Cancel", "danger");
 
-    root.append(canvas, statusRow, padsRow, outRow, midRow, presetRow, batchBtn, acceptBtn, cancelBtn);
+    const ctrl = el("div", "display:flex;flex-direction:column;gap:6px;margin-top:6px;");
+    ctrl.append(statusRow, padsRow, outRow, midRow, presetRow, batchBtn, acceptBtn, cancelBtn);
+    root.append(stage, ctrl);
 
     const ui = {
-        node, st, root, canvas, statusText, fitBtn,
+        node, st, root, canvas, statusText, zoomPill,
         padInputs, wField, hField, aspectSel, scaleBtns,
         anchorBtns, swMask, swBg, swFill,
         saveBtn, loadBtn, listOverlay, namePanel, nameField, nameOk, nameCancel,
         batchBtn, acceptBtn, cancelBtn,
         w: {
             grid: findWidget(node, "grid_snap"),
+            fillMode: findWidget(node, "fill_mode"),
             padL: findWidget(node, "pad_left"),
             padT: findWidget(node, "pad_top"),
             padR: findWidget(node, "pad_right"),
@@ -504,12 +524,21 @@ function refreshControls(ui) {
     if (document.activeElement !== ui.hField) ui.hField.value = st.srcH ? outH(st) : "";
     for (const b of ui.anchorBtns) {
         const on = Number(b.dataset.fx) === st.anchor.fx && Number(b.dataset.fy) === st.anchor.fy;
+        b._on = on;
         b.style.background = on ? "rgba(255,255,255,0.75)" : T.btn;
         b.style.borderColor = on ? "rgba(255,255,255,0.75)" : T.border;
     }
     ui.swMask.sync(st.colors.mask);
     ui.swBg.sync(st.colors.bg);
     ui.swFill.sync(st.colors.fill);
+    // the fill color only matters in solid_color mode - dim it otherwise
+    const solidFill = ui.w.fillMode?.value === "solid_color";
+    ui.swFill.host.style.opacity = solidFill ? "1" : "0.4";
+    ui.swFill.host.style.pointerEvents = solidFill ? "auto" : "none";
+    if (ui.zoomPill) {
+        const pct = st.view.fitScale ? Math.round(100 * st.view.scale / st.view.fitScale) : 100;
+        ui.zoomPill.textContent = pct + "%";
+    }
     ui.statusText.textContent = st.waiting
         ? "Paused — frame the outpaint, then press Accept"
         : (st.armed ? "Batch armed — queued runs reuse this frame" : (st.srcW ? `${st.srcW} × ${st.srcH} source` : "Idle"));
@@ -603,15 +632,16 @@ function wireEditor(ui) {
         st.view.oy = m.y - (m.y - st.view.oy) * (next / st.view.scale);
         st.view.scale = next;
         draw(st, canvas);
+        if (st.view.fitScale) ui.zoomPill.textContent = Math.round(100 * st.view.scale / st.view.fitScale) + "%";
     }, { passive: false });
 
     canvas.addEventListener("dblclick", () => {
         fitView(st, canvas.clientWidth, canvas.clientHeight);
-        draw(st, canvas);
+        repaint(ui);
     });
-    ui.fitBtn.addEventListener("click", () => {
+    ui.zoomPill.addEventListener("click", () => {
         fitView(st, canvas.clientWidth, canvas.clientHeight);
-        draw(st, canvas);
+        repaint(ui);
     });
 
     // pads typed directly
@@ -678,6 +708,16 @@ function wireEditor(ui) {
         ui.w.grid.callback = function (value, ...rest) {
             const r = orig?.call(this, value, ...rest);
             st.grid = parseInt(value, 10) || 16;
+            repaint(ui);
+            return r;
+        };
+    }
+
+    // fill_mode drives whether the fill swatch is active
+    if (ui.w.fillMode) {
+        const orig = ui.w.fillMode.callback;
+        ui.w.fillMode.callback = function (value, ...rest) {
+            const r = orig?.call(this, value, ...rest);
             repaint(ui);
             return r;
         };
