@@ -323,7 +323,9 @@ function draw(st, canvas) {
     if (st.pads.l > 0) miniPill(ctx, (r.x0 + ix0) / 2, cy, `+${st.pads.l}`);
     if (st.pads.r > 0) miniPill(ctx, (ix0 + iw + r.x1) / 2, cy, `+${st.pads.r}`);
 
-    pill(ctx, cx, r.y1 - 16, `${outW(st)} x ${outH(st)}`);
+    // sit the size readout just below the frame so it never collides with the
+    // bottom pad readout; clamp to the canvas when the frame bottom is off-view
+    pill(ctx, cx, Math.min(ch - 13, r.y1 + 15), `${outW(st)} x ${outH(st)}`);
 }
 
 // ---------------------------------------------------------------------------
