@@ -38,12 +38,12 @@ const T = {
     text: "#cccccc",
     textBright: "#ffffff",
     textDim: "rgba(255,255,255,0.55)",
-    okBg: "rgba(80,200,120,0.12)",
-    okBorder: "rgba(80,200,120,0.45)",
-    okText: "#9fe6b8",
-    dangerBg: "rgba(230,90,90,0.12)",
-    dangerBorder: "rgba(230,90,90,0.45)",
-    dangerText: "#f2a6a6",
+    okBg: "rgba(90,150,255,0.14)",
+    okBorder: "rgba(90,150,255,0.5)",
+    okText: "#a8cdff",
+    dangerBg: "rgba(255,255,255,0.05)",
+    dangerBorder: "#4a4a4a",
+    dangerText: "#b8b8b8",
 };
 
 let queueWasRunning = false;
