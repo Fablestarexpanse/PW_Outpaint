@@ -49,6 +49,7 @@ You'll find the node under **Add Node → Promptwaffle → PW Outpaint** (or dou
 | `control_mask` | MASK | 1.0 where new content should be generated, 0.0 over the original image |
 | `mask_image` | IMAGE | The mask rendered with your mask/bg colors (handy for edit-model prompts like "replace the red area") |
 | `width` / `height` | INT | Final canvas dimensions |
+| `frame` | PW_FRAME | The framing data (paddings + source size) — feed it to **PW Outpaint Stitch** |
 
 ### Node options
 
@@ -59,6 +60,20 @@ You'll find the node under **Add Node → Promptwaffle → PW Outpaint** (or dou
 | `mask_feather` | 0 | Gaussian feather radius (px) on the mask seam. The fully-new region always stays solid |
 | `mask_expand` | 0 | Grows the mask into the original image so generation overlaps the seam — great for hiding hard edges |
 | `pad_left/top/right/bottom` | 0 | The frame itself. Managed by the editor, but they're ordinary widgets — scriptable via the API |
+
+## PW Outpaint Stitch — keep the original pixel-perfect
+
+Sampling an outpaint pushes the *whole* canvas through the VAE, which subtly shifts every pixel — even the ones that were never masked. **PW Outpaint Stitch** fixes that: after generation, it pastes your untouched original image back into its exact spot, with a feathered seam so the transition into the generated area stays invisible.
+
+Wire it after your VAE Decode:
+
+```
+VAEDecode ──────────────→ images ┐
+LoadImage (the original) → source ├ PW Outpaint Stitch → final image
+PW Outpaint frame output → frame  ┘
+```
+
+`seam_feather` (default 24) controls how many pixels of the source edge blend into the generated area. It also auto-corrects small size drift if your sampler returned a slightly different resolution. The included example workflow already has it wired up.
 
 ### Batch mode
 
@@ -79,10 +94,6 @@ LoadImage → PW Outpaint ─ control_image → VAEEncode → ReferenceLatent �
 ```
 
 You'll need to point the loader nodes at your own Klein 9B checkpoint, Flux.2 VAE, and text encoder — the filenames in the example are placeholders.
-
-## Credits
-
-The pause-and-frame workflow concept was popularized by RaykoStudio's RS Outpaint node — this project is an independent, from-scratch implementation of that idea with its own editor, data model, and feature set.
 
 ## License
 

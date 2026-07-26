@@ -128,6 +128,7 @@ function freshState() {
         view: { scale: 1, ox: 0, oy: 0 },
         waiting: false, batch: false, armed: false,
         hover: null, drag: null,
+        execId: "",
     };
 }
 
@@ -144,10 +145,12 @@ function splitExtra(extra, fraction, grid) {
 }
 
 function setOutputSize(st, w, h) {
-    const ow = Math.max(st.srcW, gridRound(w, st.grid));
-    const oh = Math.max(st.srcH, gridRound(h, st.grid));
-    [st.pads.l, st.pads.r] = splitExtra(ow - st.srcW, st.anchor.fx, st.grid);
-    [st.pads.t, st.pads.b] = splitExtra(oh - st.srcH, st.anchor.fy, st.grid);
+    // snap the EXTRA, not the total: a non-grid-aligned source must not have
+    // its output size drift just because the anchor or one axis was touched
+    const extraW = Math.max(0, gridRound(w - st.srcW, st.grid));
+    const extraH = Math.max(0, gridRound(h - st.srcH, st.grid));
+    [st.pads.l, st.pads.r] = splitExtra(extraW, st.anchor.fx, st.grid);
+    [st.pads.t, st.pads.b] = splitExtra(extraH, st.anchor.fy, st.grid);
 }
 
 function applyAspect(st, ratio) {
@@ -334,7 +337,7 @@ function pushToWidgets(st, ui) {
     if (ui.w.padT) ui.w.padT.value = st.pads.t;
     if (ui.w.padR) ui.w.padR.value = st.pads.r;
     if (ui.w.padB) ui.w.padB.value = st.pads.b;
-    if (ui.w.style) ui.w.style.value = JSON.stringify(st.colors);
+    if (ui.w.style) ui.w.style.value = JSON.stringify({ v: 1, ...st.colors, anchor: st.anchor });
     ui.node.graph?.setDirtyCanvas(true, true);
 }
 
@@ -345,12 +348,26 @@ function pullFromWidgets(st, ui) {
         r: Math.max(0, parseInt(ui.w.padR?.value, 10) || 0),
         b: Math.max(0, parseInt(ui.w.padB?.value, 10) || 0),
     };
-    try {
-        const style = JSON.parse(ui.w.style?.value || "{}");
-        for (const k of ["mask", "bg", "fill"]) {
-            if (/^#[0-9a-f]{6}$/i.test(style[k] || "")) st.colors[k] = style[k];
+    const raw = ui.w.style?.value || "";
+    if (raw) {
+        try {
+            const style = JSON.parse(raw);
+            if (style.v !== 1) {
+                // widget values from an incompatible version: indices may have
+                // shifted, so don't trust the numbers that landed in the pads
+                st.pads = { l: 0, t: 0, r: 0, b: 0 };
+            } else {
+                for (const k of ["mask", "bg", "fill"]) {
+                    if (/^#[0-9a-f]{6}$/i.test(style[k] || "")) st.colors[k] = style[k];
+                }
+                if (style.anchor && Number.isFinite(style.anchor.fx) && Number.isFinite(style.anchor.fy)) {
+                    st.anchor = { fx: style.anchor.fx, fy: style.anchor.fy };
+                }
+            }
+        } catch {
+            st.pads = { l: 0, t: 0, r: 0, b: 0 };
         }
-    } catch { /* keep defaults */ }
+    }
     st.grid = parseInt(ui.w.grid?.value, 10) || 16;
 }
 
@@ -472,7 +489,9 @@ function buildEditor(node) {
             style: findWidget(node, "style_state"),
         },
         heartbeat: null,
+        loadToken: 0,
     };
+    st.execId = String(node.id);
     return ui;
 }
 
@@ -530,6 +549,7 @@ function wireEditor(ui) {
 
     canvas.addEventListener("pointerdown", (e) => {
         if (!st.img) return;
+        if (e.button !== 0 && e.button !== 1) return;
         const m = mouse(e);
         const mode = e.button === 1 ? null : hitTest(st, m.x, m.y);
         canvas.setPointerCapture(e.pointerId);
@@ -748,10 +768,11 @@ function wirePresets(ui) {
         }
     });
 
-    document.addEventListener("click", (e) => {
+    ui.onDocClick = (e) => {
         if (!ui.listOverlay?.contains(e.target) && !ui.loadBtn?.contains(e.target)) ui.listOverlay.style.display = "none";
         if (!ui.namePanel?.contains(e.target) && e.target !== ui.saveBtn) ui.namePanel.style.display = "none";
-    });
+    };
+    document.addEventListener("click", ui.onDocClick);
 }
 
 function wireSession(ui, ensureNodeFits) {
@@ -760,17 +781,42 @@ function wireSession(ui, ensureNodeFits) {
     const stopHeartbeat = () => {
         if (ui.heartbeat) { clearInterval(ui.heartbeat); ui.heartbeat = null; }
     };
+    const expireSession = () => {
+        stopHeartbeat();
+        if (!st.waiting) return;
+        st.waiting = false;
+        setActionsVisible(ui, false);
+        ensureNodeFits(true);
+        repaint(ui);
+        ui.statusText.textContent = "Session expired — run again";
+    };
+    const beat = async () => {
+        try {
+            const r = await postJSON("/pw_outpaint/heartbeat", { node_id: st.execId });
+            if (r.status === 404) expireSession();
+        } catch { /* transient network error: keep trying */ }
+    };
     const startHeartbeat = () => {
         stopHeartbeat();
-        ui.heartbeat = setInterval(() => {
-            postJSON("/pw_outpaint/heartbeat", { node_id: String(node.id) }).catch(() => {});
-        }, 3000);
+        ui.heartbeat = setInterval(beat, 3000);
+    };
+    // hidden tabs throttle timers hard; catch up the moment we're visible again
+    ui.onVisibility = () => { if (ui.heartbeat && !document.hidden) beat(); };
+    document.addEventListener("visibilitychange", ui.onVisibility);
+
+    // Inside a subgraph the execution id is prefixed ("103:92") while node.id
+    // is the local id - match on the suffix and talk to the server with the
+    // full execution id.
+    const matchesNode = (execId) => {
+        const s = String(execId);
+        return s === String(node.id) || s.split(":").pop() === String(node.id);
     };
 
     const onShow = (event) => {
         const data = event.detail || event;
-        if (String(data.node_id) !== String(node.id)) return;
+        if (!matchesNode(data.node_id)) return;
         pullFromWidgets(st, ui);
+        st.execId = String(data.node_id);
         st.srcW = data.image_width;
         st.srcH = data.image_height;
         st.waiting = true;
@@ -780,13 +826,19 @@ function wireSession(ui, ensureNodeFits) {
         ui.batchBtn.textContent = "Batch off";
         setActionsVisible(ui, true);
         ensureNodeFits();
+        const token = ++ui.loadToken;
         const img = new Image();
         img.onload = () => {
+            if (token !== ui.loadToken) return; // a newer frame superseded this one
             st.img = img;
             fitView(st, ui.canvas.clientWidth, ui.canvas.clientHeight);
             repaint(ui);
         };
-        img.src = api.apiURL(`/view?filename=pw_outpaint_${data.node_id}.png&type=temp&subfolder=pw_outpaint&t=${Date.now()}`);
+        img.onerror = () => {
+            if (token !== ui.loadToken) return;
+            ui.statusText.textContent = "Could not load the preview image";
+        };
+        img.src = api.apiURL(`${data.image_url}&t=${Date.now()}`);
         startHeartbeat();
         repaint(ui);
     };
@@ -798,8 +850,8 @@ function wireSession(ui, ensureNodeFits) {
         ui.batchBtn.textContent = st.batch ? "Batch on" : "Batch off";
         if (st.armed) {
             // toggling after arming enables/disables the stored frame server-side
-            try { await postJSON("/pw_outpaint/batch_toggle", { node_id: String(node.id), enabled: st.batch }); } catch { }
-            if (!st.batch) { st.armed = false; setActionsVisible(ui, st.waiting); }
+            try { await postJSON("/pw_outpaint/batch_toggle", { node_id: st.execId, enabled: st.batch }); } catch { }
+            if (!st.batch) { st.armed = false; setActionsVisible(ui, st.waiting); ensureNodeFits(true); }
             repaint(ui);
         }
     });
@@ -809,7 +861,7 @@ function wireSession(ui, ensureNodeFits) {
         ui.acceptBtn.disabled = true;
         try {
             const resp = await postJSON("/pw_outpaint/decision", {
-                node_id: String(node.id),
+                node_id: st.execId,
                 decision: "accept",
                 pads: { ...st.pads },
                 style: { ...st.colors },
@@ -820,7 +872,9 @@ function wireSession(ui, ensureNodeFits) {
                 st.waiting = false;
                 st.armed = st.batch;
                 setActionsVisible(ui, false);
-                ensureNodeFits();
+                ensureNodeFits(true);
+            } else {
+                expireSession(); // the pause is gone server-side (timeout or another client)
             }
         } catch (err) {
             console.error("PW Outpaint accept failed:", err);
@@ -836,7 +890,8 @@ function wireSession(ui, ensureNodeFits) {
         st.batch = false;
         st.armed = false;
         setActionsVisible(ui, false);
-        try { await postJSON("/pw_outpaint/decision", { node_id: String(node.id), decision: "cancel" }); } catch { }
+        ensureNodeFits(true);
+        try { await postJSON("/pw_outpaint/decision", { node_id: st.execId, decision: "cancel" }); } catch { }
         repaint(ui);
     });
 
@@ -846,9 +901,11 @@ function wireSession(ui, ensureNodeFits) {
     node.onRemoved = function () {
         stopHeartbeat();
         api.removeEventListener("pw_outpaint.show", onShow);
+        document.removeEventListener("visibilitychange", ui.onVisibility);
+        if (ui.onDocClick) document.removeEventListener("click", ui.onDocClick);
         liveNodes = liveNodes.filter((entry) => entry.node !== node);
-        postJSON("/pw_outpaint/clear_preset", { node_id: String(node.id) }).catch(() => {});
-        postJSON("/pw_outpaint/cleanup", { node_id: String(node.id) }).catch(() => {});
+        postJSON("/pw_outpaint/clear_preset", { node_id: st.execId }).catch(() => {});
+        postJSON("/pw_outpaint/cleanup", { node_id: st.execId }).catch(() => {});
         if (origOnRemoved) origOnRemoved.call(this);
     };
 
@@ -872,7 +929,8 @@ api.addEventListener("status", (e) => {
                 setBtnOn(ui.batchBtn, false);
                 ui.batchBtn.textContent = "Batch off";
                 setActionsVisible(ui, false);
-                postJSON("/pw_outpaint/clear_preset", { node_id: String(ui.node.id) }).catch(() => {});
+                ui.ensureFits?.(true);
+                postJSON("/pw_outpaint/clear_preset", { node_id: ui.st.execId }).catch(() => {});
                 ui.statusText.textContent = "Batch complete";
                 repaint(ui);
             }
@@ -912,11 +970,13 @@ app.registerExtension({
             const domWidget = node.addDOMWidget("pw_outpaint_editor", "custom", ui.root, { serialize: false, hideOnZoom: false });
             domWidget.computeSize = () => [520, EDITOR_H + (st.waiting || st.armed ? ACTIVE_H : REST_H)];
 
-            const ensureNodeFits = () => {
+            const ensureNodeFits = (shrink = false) => {
                 const cs = node.computeSize();
-                node.setSize([Math.max(node.size[0], 540), Math.max(node.size[1], cs[1])]);
+                const h = shrink ? cs[1] : Math.max(node.size[1], cs[1]);
+                node.setSize([Math.max(node.size[0], 540), h]);
                 node.graph?.setDirtyCanvas(true, true);
             };
+            ui.ensureFits = ensureNodeFits;
             ensureNodeFits();
             const origOnConfigure = node.onConfigure;
             node.onConfigure = function (...args) {

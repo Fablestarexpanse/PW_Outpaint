@@ -12,6 +12,7 @@ period using whatever paddings are stored on the node.
 
 import json
 import os
+import re
 import threading
 import time
 
@@ -27,7 +28,10 @@ import server
 
 _MIN_DIM = 32
 _MAX_PAD = 8192
-_GRACE_SECONDS = 10.0
+# Headless runs continue quickly; once a browser has checked in we wait much
+# longer, because hidden-tab timer throttling can stretch heartbeats past 60s.
+_GRACE_HEADLESS = 15.0
+_GRACE_ATTACHED = 90.0
 _POLL_SECONDS = 0.25
 
 _NODE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +47,7 @@ _DEFAULT_STYLE = {"mask": "#ff0000", "bg": "#141414", "fill": "#808080"}
 class _Session:
     """One paused execution waiting for a verdict from the editor."""
 
-    __slots__ = ("event", "verdict", "pads", "style", "batch", "last_seen")
+    __slots__ = ("event", "verdict", "pads", "style", "batch", "last_seen", "closed", "attached")
 
     def __init__(self):
         self.event = threading.Event()
@@ -52,10 +56,33 @@ class _Session:
         self.style = None     # {"mask":hex,"bg":hex,"fill":hex}
         self.batch = False
         self.last_seen = time.time()
+        self.closed = False   # set when the execution thread stops listening
+        self.attached = False  # a browser has heartbeated at least once
 
 
+_STATE_LOCK = threading.Lock()
 _SESSIONS = {}   # node_id -> _Session
-_BATCH = {}      # node_id -> {"pads":..., "style":..., "active":bool}
+_BATCH = {}      # node_id -> {"pads":..., "style":..., "active":bool, "ts":float}
+_BATCH_TTL = 3600.0  # forget remembered frames after an hour of disuse
+
+
+def _open_session(node_id, session):
+    with _STATE_LOCK:
+        _SESSIONS[node_id] = session
+
+
+def _close_session(node_id, session):
+    with _STATE_LOCK:
+        session.closed = True
+        if _SESSIONS.get(node_id) is session:
+            del _SESSIONS[node_id]
+
+
+def _live_session(node_id):
+    """Fetch the session for a node if the execution thread still listens."""
+    with _STATE_LOCK:
+        session = _SESSIONS.get(node_id)
+        return session if session is not None and not session.closed else None
 
 
 def _hex_rgb(value, fallback):
@@ -93,13 +120,8 @@ def _parse_style_state(text):
 # image composition
 # ---------------------------------------------------------------------------
 
-def _mirror_index(idx, n):
-    """Fold out-of-range indices back into [0, n) by reflection."""
-    if n <= 1:
-        return np.zeros_like(idx)
-    period = 2 * n - 2
-    folded = np.mod(idx, period)
-    return np.where(folded >= n, period - folded, folded)
+def _pad_spec(pads):
+    return ((0, 0), (pads["t"], pads["b"]), (pads["l"], pads["r"]), (0, 0))
 
 
 def _fill_canvas(src_np, pads, mode, fill_rgb):
@@ -109,14 +131,10 @@ def _fill_canvas(src_np, pads, mode, fill_rgb):
     out_w = src_w + pads["l"] + pads["r"]
 
     if mode == "edge_extend":
-        rows = np.clip(np.arange(out_h) - pads["t"], 0, src_h - 1)
-        cols = np.clip(np.arange(out_w) - pads["l"], 0, src_w - 1)
-        return src_np[:, rows][:, :, cols].copy()
+        return np.pad(src_np, _pad_spec(pads), mode="edge")
 
     if mode == "mirror_blur":
-        rows = _mirror_index(np.arange(out_h) - pads["t"], src_h)
-        cols = _mirror_index(np.arange(out_w) - pads["l"], src_w)
-        canvas = src_np[:, rows][:, :, cols].copy()
+        canvas = np.pad(src_np, _pad_spec(pads), mode="reflect" if src_h > 1 and src_w > 1 else "edge")
         radius = float(np.clip(0.05 * max(out_w, out_h), 8, 64))
         for i in range(batch):
             frame = Image.fromarray((canvas[i] * 255).clip(0, 255).astype(np.uint8))
@@ -150,8 +168,11 @@ def _refine_mask(hard_mask, expand, feather):
     """Optionally dilate the mask into the image, then soften the seam."""
     mask = hard_mask
     if expand > 0:
+        # square dilation is separable: two 1D max-pools instead of one k x k pool
+        k = 2 * expand + 1
         t = torch.from_numpy(mask)[None, None]
-        t = TF.max_pool2d(t, kernel_size=2 * expand + 1, stride=1, padding=expand)
+        t = TF.max_pool2d(t, kernel_size=(k, 1), stride=1, padding=(expand, 0))
+        t = TF.max_pool2d(t, kernel_size=(1, k), stride=1, padding=(0, expand))
         mask = t[0, 0].numpy()
     if feather > 0:
         blurred = Image.fromarray((mask * 255).clip(0, 255).astype(np.uint8))
@@ -168,7 +189,9 @@ def _publish_preview(frame, node_id):
     subfolder = "pw_outpaint"
     out_dir = os.path.join(folder_paths.get_temp_directory(), subfolder)
     os.makedirs(out_dir, exist_ok=True)
-    name = f"pw_outpaint_{node_id}.png"
+    # subgraph unique_ids look like "103:92" - ':' is not a legal filename char
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", node_id)
+    name = f"pw_outpaint_{safe_id}.png"
     img.save(os.path.join(out_dir, name))
     return f"/view?filename={name}&type=temp&subfolder={subfolder}", img.width, img.height
 
@@ -205,8 +228,8 @@ class PWOutpaint:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT")
-    RETURN_NAMES = ("control_image", "control_mask", "mask_image", "width", "height")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "INT", "PW_FRAME")
+    RETURN_NAMES = ("control_image", "control_mask", "mask_image", "width", "height", "frame")
     FUNCTION = "outpaint"
     OUTPUT_NODE = True
     CATEGORY = "Promptwaffle"
@@ -220,6 +243,9 @@ class PWOutpaint:
     def outpaint(self, image, grid_snap, fill_mode, mask_feather, mask_expand,
                  pad_left, pad_top, pad_right, pad_bottom, style_state, unique_id):
         src = image if image.dim() == 4 else image.unsqueeze(0)
+        if src.shape[-1] == 1:
+            src = src.repeat(1, 1, 1, 3)
+        src = src[..., :3]  # drop alpha; the compose pipeline is RGB
         batch, src_h, src_w, _ = src.shape
         if src_w < _MIN_DIM or src_h < _MIN_DIM:
             raise ValueError(f"PW Outpaint: input image too small ({src_w}x{src_h}).")
@@ -228,12 +254,20 @@ class PWOutpaint:
         pads = _clean_pads({"l": pad_left, "t": pad_top, "r": pad_right, "b": pad_bottom}, None)
         style = _parse_style_state(style_state)
 
-        remembered = _BATCH.get(node_id, {})
-        if remembered.get("active"):
+        with _STATE_LOCK:
+            remembered = _BATCH.get(node_id)
+            if remembered and time.time() - remembered.get("ts", 0) > _BATCH_TTL:
+                del _BATCH[node_id]
+                remembered = None
+            batch_active = bool(remembered and remembered.get("active"))
+            if batch_active:
+                remembered["ts"] = time.time()
+                remembered = dict(remembered)
+
+        if batch_active:
             pads = _clean_pads(remembered.get("pads"), pads)
             style = _clean_style(remembered.get("style") or style)
         else:
-            _BATCH.pop(node_id, None)
             verdict = self._await_editor(src[0], node_id)
             if verdict is not None:
                 if verdict.verdict == "cancel":
@@ -255,9 +289,10 @@ class PWOutpaint:
         mask_rgb = np.asarray(_hex_rgb(style["mask"], (1.0, 0.0, 0.0)), dtype=np.float32)
         bg_rgb = np.asarray(_hex_rgb(style["bg"], (0.08, 0.08, 0.08)), dtype=np.float32)
         colorized = mask[..., None] * mask_rgb + (1.0 - mask[..., None]) * bg_rgb
-        mask_image = torch.from_numpy(colorized.clip(0.0, 1.0)).unsqueeze(0)
+        mask_image = torch.from_numpy(colorized.clip(0.0, 1.0)).unsqueeze(0).repeat(batch, 1, 1, 1)
 
-        return (control_image, control_mask, mask_image, out_w, out_h)
+        frame_info = {"pads": dict(pads), "src_w": src_w, "src_h": src_h}
+        return (control_image, control_mask, mask_image, out_w, out_h, frame_info)
 
     def _await_editor(self, frame, node_id):
         """Publish the frame to the editor and wait for its verdict.
@@ -266,7 +301,7 @@ class PWOutpaint:
         the grace period (headless runs, closed tab, node deleted).
         """
         session = _Session()
-        _SESSIONS[node_id] = session
+        _open_session(node_id, session)
         try:
             try:
                 url, width, height = _publish_preview(frame, node_id)
@@ -283,10 +318,11 @@ class PWOutpaint:
                 mm.throw_exception_if_processing_interrupted()
                 if session.event.wait(_POLL_SECONDS):
                     return session
-                if time.time() - session.last_seen > _GRACE_SECONDS:
+                grace = _GRACE_ATTACHED if session.attached else _GRACE_HEADLESS
+                if time.time() - session.last_seen > grace:
                     return None
         finally:
-            _SESSIONS.pop(node_id, None)
+            _close_session(node_id, session)
 
 
 NODE_CLASS_MAPPINGS = {"PWOutpaint": PWOutpaint}
@@ -299,101 +335,129 @@ NODE_DISPLAY_NAME_MAPPINGS = {"PWOutpaint": "PW Outpaint"}
 
 routes = server.PromptServer.instance.routes
 
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
+                   *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+_MAX_PRESET_BYTES = 16384
+
 
 def _preset_path(name):
     clean = "".join(c for c in str(name or "") if c.isalnum() or c in " _-").strip()
-    return os.path.join(_PRESET_DIR, f"{clean}.json") if clean else None
+    if not clean or clean.upper() in _RESERVED_NAMES:
+        return None
+    return os.path.join(_PRESET_DIR, f"{clean}.json")
+
+
+async def _body(request):
+    try:
+        data = await request.json()
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _fail(status, text):
+    return web.Response(status=status, text=text)
 
 
 @routes.post("/pw_outpaint/decision")
 async def pw_decision(request):
-    try:
-        data = await request.json()
-        node_id = str(data.get("node_id"))
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    node_id = str(data.get("node_id"))
+    decision = data.get("decision")
+    if decision not in ("accept", "cancel"):
+        return _fail(400, "Unknown decision")
+    with _STATE_LOCK:
         session = _SESSIONS.get(node_id)
-        if session is None:
-            return web.Response(status=404, text="Not waiting")
-        decision = data.get("decision")
+        if session is None or session.closed or session.event.is_set():
+            return _fail(409, "No pending pause")
         if decision == "accept":
             session.verdict = "accept"
             session.pads = data.get("pads")
             session.style = data.get("style")
             session.batch = bool(data.get("batch_mode", False))
             if session.batch and session.pads:
-                _BATCH[node_id] = {"pads": session.pads, "style": session.style, "active": True}
-        elif decision == "cancel":
+                _BATCH[node_id] = {"pads": session.pads, "style": session.style,
+                                   "active": True, "ts": time.time()}
+        else:
             session.verdict = "cancel"
             _BATCH.pop(node_id, None)
-        else:
-            return web.Response(status=400, text="Unknown decision")
         session.event.set()
-        return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    return web.Response(status=200, text="OK")
 
 
 @routes.post("/pw_outpaint/heartbeat")
 async def pw_heartbeat(request):
-    try:
-        data = await request.json()
-        session = _SESSIONS.get(str(data.get("node_id")))
-        if session is None:
-            return web.Response(status=404, text="Not found")
-        session.last_seen = time.time()
-        return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    session = _live_session(str(data.get("node_id")))
+    if session is None:
+        return _fail(404, "Not found")
+    session.last_seen = time.time()
+    session.attached = True
+    return web.Response(status=200, text="OK")
 
 
 @routes.post("/pw_outpaint/cleanup")
 async def pw_cleanup(request):
-    try:
-        data = await request.json()
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    with _STATE_LOCK:
         session = _SESSIONS.get(str(data.get("node_id")))
-        if session is not None:
+        if session is not None and not session.closed and not session.event.is_set():
             session.verdict = "detach"
             session.event.set()
-        return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    return web.Response(status=200, text="OK")
 
 
 @routes.post("/pw_outpaint/batch_toggle")
 async def pw_batch_toggle(request):
-    try:
-        data = await request.json()
-        node_id = str(data.get("node_id"))
-        enabled = bool(data.get("enabled", False))
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    node_id = str(data.get("node_id"))
+    enabled = bool(data.get("enabled", False))
+    with _STATE_LOCK:
         if node_id in _BATCH:
             _BATCH[node_id]["active"] = enabled
-        return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+            _BATCH[node_id]["ts"] = time.time()
+    return web.Response(status=200, text="OK")
 
 
 @routes.post("/pw_outpaint/clear_preset")
 async def pw_clear_preset(request):
-    try:
-        data = await request.json()
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    with _STATE_LOCK:
         _BATCH.pop(str(data.get("node_id")), None)
-        return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    return web.Response(status=200, text="OK")
 
 
 @routes.post("/pw_outpaint/save_preset")
 async def pw_save_preset(request):
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    path = _preset_path(data.get("name"))
+    if not path:
+        return _fail(400, "Invalid name")
+    preset = data.get("preset_data")
+    if not isinstance(preset, dict):
+        return _fail(400, "Invalid preset")
+    payload = json.dumps(preset, indent=2)
+    if len(payload) > _MAX_PRESET_BYTES:
+        return _fail(400, "Preset too large")
     try:
-        data = await request.json()
-        path = _preset_path(data.get("name"))
-        if not path:
-            return web.Response(status=400, text="Name required")
         os.makedirs(_PRESET_DIR, exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump(data.get("preset_data", {}), fh, indent=2)
+            fh.write(payload)
         return web.Response(status=200, text="OK")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    except Exception:
+        return _fail(500, "Save failed")
 
 
 @routes.post("/pw_outpaint/list_presets")
@@ -403,31 +467,35 @@ async def pw_list_presets(request):
         if os.path.isdir(_PRESET_DIR):
             names = sorted(f[:-5] for f in os.listdir(_PRESET_DIR) if f.endswith(".json"))
         return web.json_response(names)
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+    except Exception:
+        return _fail(500, "List failed")
 
 
 @routes.post("/pw_outpaint/load_preset")
 async def pw_load_preset(request):
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    path = _preset_path(data.get("name"))
     try:
-        data = await request.json()
-        path = _preset_path(data.get("name"))
         if path and os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as fh:
                 return web.json_response(json.load(fh))
-        return web.Response(status=404, text="Preset not found")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+        return _fail(404, "Preset not found")
+    except Exception:
+        return _fail(500, "Load failed")
 
 
 @routes.post("/pw_outpaint/delete_preset")
 async def pw_delete_preset(request):
+    data = await _body(request)
+    if data is None:
+        return _fail(400, "Bad request")
+    path = _preset_path(data.get("name"))
     try:
-        data = await request.json()
-        path = _preset_path(data.get("name"))
         if path and os.path.isfile(path):
             os.remove(path)
             return web.Response(status=200, text="OK")
-        return web.Response(status=404, text="Preset not found")
-    except Exception as exc:
-        return web.Response(status=500, text=str(exc))
+        return _fail(404, "Preset not found")
+    except Exception:
+        return _fail(500, "Delete failed")

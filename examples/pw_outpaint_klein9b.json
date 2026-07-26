@@ -1,8 +1,8 @@
 {
   "id": "f23c8d0c-705f-4da9-a580-9efd412507a8",
   "revision": 0,
-  "last_node_id": 106,
-  "last_link_id": 153,
+  "last_node_id": 107,
+  "last_link_id": 152,
   "nodes": [
     {
       "id": 30,
@@ -47,7 +47,8 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            115
+            115,
+            150
           ]
         },
         {
@@ -104,7 +105,7 @@
           "localized_name": "images",
           "name": "images",
           "type": "IMAGE",
-          "link": 149
+          "link": 152
         },
         {
           "label": "filename_prefix",
@@ -374,6 +375,13 @@
           "links": [
             148
           ]
+        },
+        {
+          "name": "frame",
+          "type": "PW_FRAME",
+          "links": [
+            151
+          ]
         }
       ],
       "properties": {
@@ -394,6 +402,53 @@
         0,
         0,
         ""
+      ]
+    },
+    {
+      "id": 107,
+      "type": "PWOutpaintStitch",
+      "pos": [
+        520,
+        -510
+      ],
+      "size": [
+        260,
+        120
+      ],
+      "flags": {},
+      "order": 90,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 149
+        },
+        {
+          "name": "source",
+          "type": "IMAGE",
+          "link": 150
+        },
+        {
+          "name": "frame",
+          "type": "PW_FRAME",
+          "link": 151
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            152
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PWOutpaintStitch"
+      },
+      "widgets_values": [
+        24
       ]
     }
   ],
@@ -441,6 +496,30 @@
     [
       149,
       103,
+      0,
+      107,
+      0,
+      "IMAGE"
+    ],
+    [
+      150,
+      30,
+      0,
+      107,
+      1,
+      "IMAGE"
+    ],
+    [
+      151,
+      92,
+      5,
+      107,
+      2,
+      "PW_FRAME"
+    ],
+    [
+      152,
+      107,
       0,
       20,
       0,
