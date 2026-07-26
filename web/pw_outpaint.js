@@ -10,7 +10,8 @@ import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "PWOutpaint";
 const CANVAS_H = 320;
-const CTRL_H = 250;
+const CTRL_H = 250;        // controls block at rest
+const CTRL_ACTIVE_H = 365; // controls block while Batch/Accept/Cancel are shown
 const MARGIN = 22;
 const OVERHANG = 1; // crop box must overlap the source by at least this many px
 const ZOOM_MIN = 0.15;
@@ -145,6 +146,7 @@ function createState() {
         fillColor: "#808080",
         batchMode: false,
         hasPreset: false,
+        actionsVisible: false,
     };
 }
 
@@ -956,8 +958,23 @@ app.registerExtension({
             setUIActive(dom, false);
 
             const domWidget = node.addDOMWidget("pw_outpaint_canvas", "custom", dom.root, { serialize: false, hideOnZoom: false });
-            domWidget.computeSize = () => [520, CANVAS_H + CTRL_H];
-            node.setSize([Math.max(node.size[0], 540), Math.max(node.size[1], CANVAS_H + CTRL_H + 10)]);
+            domWidget.computeSize = () => [520, CANVAS_H + (st.actionsVisible ? CTRL_ACTIVE_H : CTRL_H)];
+
+            // Grow the node so the widget (incl. the Batch/Accept/Cancel row when
+            // visible) is never clipped - e.g. after loading a workflow saved with
+            // a smaller node size.
+            const ensureNodeFits = () => {
+                const cs = node.computeSize();
+                node.setSize([Math.max(node.size[0], 540), Math.max(node.size[1], cs[1])]);
+                node.graph?.setDirtyCanvas(true, true);
+            };
+            ensureNodeFits();
+            const origOnConfigure = node.onConfigure;
+            node.onConfigure = function (...args) {
+                const r = origOnConfigure?.apply(this, args);
+                requestAnimationFrame(ensureNodeFits);
+                return r;
+            };
 
             node._pwHeartbeat = null;
             const stopHeartbeat = () => {
@@ -1014,6 +1031,8 @@ app.registerExtension({
                     dom.acceptBtn.style.display = "block";
                     dom.cancelBtn.style.display = "block";
                     dom.batchBtn.style.display = "block";
+                    st.actionsVisible = true;
+                    ensureNodeFits();
                     setBatchVisual(st, dom, false);
                     loadPreviewImage(data.node_id);
                     startHeartbeat();
@@ -1047,6 +1066,7 @@ app.registerExtension({
                             dom.acceptBtn.style.display = "none";
                             dom.cancelBtn.style.display = "none";
                             dom.batchBtn.style.display = "none";
+                            st.actionsVisible = false;
                             flashMessage(dom, "Frame saved. Batch mode armed.");
                         } else {
                             resetNodeState(st, dom, widgets);
