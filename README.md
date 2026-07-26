@@ -11,6 +11,10 @@ Four nodes, one shared frame model:
 | **PW Banded Color Match** | Color-corrects only the generated bands, fitted against the adjacent source |
 | **PW Band Meter** | Numeric QC: flags bands whose brightness, saturation, or detail drifted from the source |
 
+All four in one workflow - framing on the left, sampling in the middle, correct / stitch / meter on the way out:
+
+![The full setup: PW Outpaint into an inpaint sampling chain, then Banded Color Match, Stitch, and Band Meter](docs/images/full-chain.png)
+
 ## Features
 
 - **Canvas editor on the node** - drag any edge or corner of the frame outward, scroll to zoom, drag outside the frame to pan, double-click to refit
@@ -127,6 +131,10 @@ Drag [`examples/pw_outpaint_klein9b.json`](examples/pw_outpaint_klein9b.json) in
 
 The heart of the pack. Receives an image, pauses the run, and opens a canvas editor on the node where you frame the outpaint: drag edges/corners out, pick an aspect, scale the canvas, or type exact paddings. On Accept it emits everything downstream nodes need. The frame is stored as four paddings, so it survives saving/loading the workflow and works headless via the API.
 
+<img src="docs/images/node-pw-outpaint.png" width="480" alt="PW Outpaint paused mid-run: the editor shows the source image with a x1.5 frame, pad readouts on all four sides, and the Batch / Accept / Cancel controls">
+
+**In the full setup:** first node after your image loader - everything else (conditioning, latent size, color match, stitch, meter) hangs off its outputs, as in the [overview at the top](#pw-outpaint).
+
 ### Inputs
 
 | Widget | Default | Notes |
@@ -218,6 +226,10 @@ Toggle **Batch on** before Accept and your framing is remembered. Every followin
 
 Sampling an outpaint pushes the *whole* canvas through the VAE, which subtly shifts every pixel - even the ones that were never masked. Stitch fixes that: it pastes your untouched original image back into its exact spot in the generated canvas, so the source stays pixel-perfect and only the new areas come from the sampler. It also auto-corrects small size drift if your sampler returned a slightly different resolution.
 
+<img src="docs/images/node-pw-stitch.png" width="300" alt="PW Outpaint Stitch node: images, source, and frame inputs, seam_feather widget, image output">
+
+**In the full setup:** last image-processing stop before saving - it takes the decoded (and optionally color-matched) canvas, the original image, and PW Outpaint's `frame`.
+
 ### Inputs
 
 | Input | Default | Notes |
@@ -239,6 +251,10 @@ Sampling an outpaint pushes the *whole* canvas through the VAE, which subtly shi
 ## PW Banded Color Match
 
 Frame-aware color correction. Global color matchers (fit one transform over the whole canvas) under-shoot outpaints, because most of the canvas is already-correct source content - the fit is dominated by pixels that need no change. This node corrects **only the generated bands**, each fitted against the strip of source content directly adjacent to it. Original pixels are never modified, at any strength. Wire it between VAEDecode and Stitch.
+
+<img src="docs/images/node-pw-banded-colormatch.png" width="300" alt="PW Banded Color Match node: images, source, and frame inputs with strength, blend_px, and mode widgets">
+
+**In the full setup:** directly after VAEDecode, before the stitch - so the bands get corrected and the pristine source then covers the middle.
 
 ### Inputs
 
@@ -264,6 +280,10 @@ Frame-aware color correction. Global color matchers (fit one transform over the 
 ## PW Band Meter
 
 Numeric QC for the finished outpaint. Measures each generated band against the source region - mean luminance (`lum`), contrast (`con`, luminance std), saturation (`sat`), and gradient detail (`det`) - and prints a PASS/WARN table right on the node. It catches what hides at thumbnail zoom: a band 2x too bright, half as saturated, or suspiciously smooth. Wire it after the stitch. Works on upscaled results too - it recovers the scale from the frame payload.
+
+<img src="docs/images/node-pw-band-meter.png" width="520" alt="PW Band Meter node after a run: the report table lists each band with luminance, saturation, and detail deviations and a WARN status">
+
+**In the full setup:** sits between the stitch and your save node, passing images straight through while reporting on the bands.
 
 ### Inputs
 
